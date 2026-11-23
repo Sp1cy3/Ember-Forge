@@ -1,6 +1,6 @@
 """Builds the Weapon Forge weapon sprites in Blender.
 
-The pixel data lives in ../weapon-forge.html, between /*WEAPONS_START*/ and /*WEAPONS_END*/,
+The pixel data lives in ../index.html, between /*WEAPONS_START*/ and /*WEAPONS_END*/,
 so the game and this file can never disagree.
 
 Run inside Blender (starts a NEW EMPTY FILE):
@@ -36,7 +36,7 @@ def expand(rows, mirror):
     return out
 
 def load_weapons():
-    html = open(os.path.join(os.path.dirname(ART), "weapon-forge.html"), encoding="utf-8").read()
+    html = open(os.path.join(os.path.dirname(ART), "index.html"), encoding="utf-8").read()
     return json.loads(re.search(r"/\*WEAPONS_START\*/(.*?)/\*WEAPONS_END\*/", html, re.S).group(1))
 
 def hex_rgba(h):

@@ -1,6 +1,6 @@
 """Builds the Weapon Forge enemy sprites in Blender.
 
-The pixel data lives in ../weapon-forge.html, between /*ENEMIES_START*/ and /*ENEMIES_END*/,
+The pixel data lives in ../index.html, between /*ENEMIES_START*/ and /*ENEMIES_END*/,
 so the game and this file can never disagree. Run inside Blender:
     exec(open(r"<path>/art/build_enemies.py", encoding="utf-8").read())
 It starts a NEW EMPTY FILE, then writes:
@@ -17,7 +17,7 @@ PX = 0.1          # Blender units per sprite pixel
 GAP = 8           # pixels between sprites in the scene / sheet
 
 def load_enemies():
-    html = open(os.path.join(ROOT, "weapon-forge.html"), encoding="utf-8").read()
+    html = open(os.path.join(ROOT, "index.html"), encoding="utf-8").read()
     m = re.search(r"/\*ENEMIES_START\*/(.*?)/\*ENEMIES_END\*/", html, re.S)
     return json.loads(m.group(1))
 
