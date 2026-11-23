@@ -1,0 +1,1442 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Weapon Forge</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0709; }
+  body { display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  canvas { image-rendering: crisp-edges; image-rendering: pixelated; display: block; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="c" width="160" height="240"></canvas>
+<script>
+'use strict';
+// ---------- setup ----------
+const W = 160, H = 240, BASE_Y = 206, FLOOR_Y = 226;
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+function fit() {
+  const s = Math.max(1, Math.floor(Math.min(innerWidth / W, innerHeight / H)));
+  cv.style.width = W * s + 'px';
+  cv.style.height = H * s + 'px';
+}
+addEventListener('resize', fit);
+fit();
+
+const C = {
+  gold: '#d9a521', goldHi: '#ffe27a', goldDk: '#8a5a12', gem: '#e0303a',
+  brown: '#7a4a2a', brownHi: '#a8693d', brownDk: '#4a2a16',
+  steel: '#b8c4cc', steelHi: '#f2f7fa', steelDk: '#6c7a86', steelMd: '#8e9ca8',
+  anv: '#3c4148', anvHi: '#6a717a', anvDk: '#22262b',
+  text: '#fff1c9', accent: '#ffcc33', red: '#ff4a3a', green: '#7cff6a', dim: '#a08a80',
+  sl: '#58c45a', slHi: '#a6f08a', slDk: '#2b6e33', slOut: '#16321a'
+};
+
+const ANVIL_SLOT = { x: 74, w: 12 }; // target for the first part
+
+// ---------- drawing helpers ----------
+function px(c, x, y, w, h, col) {
+  c.fillStyle = col;
+  c.fillRect(Math.floor(x), Math.floor(y), Math.round(w), Math.round(h));
+}
+
+// ---------- pixel-art data format (weapons and enemies) ----------
+// Rows are run-length coded: "12.8o" = 12 x '.', 8 x 'o'. '.' is transparent.
+// "28*<row>" repeats a row 28 times. mirror:true rows are the left half; the right half is the reversed copy.
+function decodeRow(s) {
+  let out = '', n = '';
+  for (const ch of s) {
+    if (ch >= '0' && ch <= '9') n += ch;
+    else { out += ch.repeat(n ? +n : 1); n = ''; }
+  }
+  return out;
+}
+function expandRows(rows, mirror, who) {
+  const out = [];
+  for (const r of rows) {
+    const m = r.match(/^(\d+)\*(.*)$/);
+    let s = decodeRow(m ? m[2] : r);
+    if (mirror) s += [...s].reverse().join('');
+    for (let i = 0; i < (m ? +m[1] : 1); i++) out.push(s);
+  }
+  out.forEach((r, y) => { if (r.length !== out[0].length) console.warn(who + ': row ' + y + ' is ' + r.length + ' px, expected ' + out[0].length); });
+  return out;
+}
+// Paints rows into a canvas, using the palette, or one solid colour (for flash / heat overlays).
+// only: optional list of palette chars to keep (e.g. just the eyes).
+function raster(rows, pal, solid, only) {
+  const c = document.createElement('canvas');
+  c.width = rows[0].length; c.height = rows.length;
+  const g = c.getContext('2d');
+  rows.forEach((r, y) => {
+    for (let x = 0; x < r.length; x++) {
+      if (r[x] === '.' || (only && !only.includes(r[x]))) continue;
+      g.fillStyle = solid || pal[r[x]] || '#f0f';
+      g.fillRect(x, y, 1, 1);
+    }
+  });
+  return c;
+}
+
+// ---------- weapons ----------
+// Each weapon is 6 stacking parts, bottom (on the anvil) to top.
+// inherit: the part is trimmed to match whatever survived of the part below (blade continuity).
+// attack: how the finished weapon strikes (swing / chop / thrust). The part named GRIP is where it is held.
+// gems: rune sockets, as a pixel rectangle inside one part's sprite (part = index, bottom part is 0).
+// Optional forgiveness, per weapon (defaults in brackets):
+//   snap  - a drop this close to centre (px) snaps to PERFECT [1.5]
+//   tol   - accuracy is scored as if parts were at least this wide (px), softening misses on thin parts [0]
+//   speed - slide speed multiplier [1]
+// The Blender script (art/build_weapons.py) reads this block between the markers, so keep it valid JSON.
+const WEAPON_DATA = /*WEAPONS_START*/{
+ "pal":{"o":"#1a1218","s":"#b8c4cc","S":"#f2f7fa","d":"#6c7a86","m":"#8e9ca8","g":"#d9a521","G":"#ffe27a","y":"#8a5a12","r":"#e0303a",
+        "l":"#7a4a2a","L":"#a8693d","b":"#4a2a16","w":"#8a5a32","W":"#b07a48","v":"#5a3a20","i":"#4a5058","I":"#7a828c","k":"#2e3238"},
+ "weapons":[
+ {"id":"sword","name":"SWORD","attack":"swing","gems":[{"part":2,"x":14,"y":2,"w":2,"h":2}],"parts":[
+  {"name":"POMMEL","rows":["2.8o2.","1.1o1G6g1y1o1.","1o1G8g1y1o","2*1o1G3g2r3g1y1o","1o9g1y1o","1.1o8y1o1.","2.8o2."]},
+  {"name":"GRIP","rows":["2*1o1L2l1b1o","1o4b1o","2*1o1L2l1b1o","1o4b1o","2*1o1L2l1b1o","1o4b1o","2*1o1L2l1b1o","1o4b1o","2*1o1L2l1b1o","1o4b1o","1o1L2l1b1o"]},
+  {"name":"CROSSGUARD","mirror":true,"rows":["1.14o","1o14G","2*1o1y12g1r","1o14y","1.14o"]},
+  {"name":"BLADE","rows":["28*1o1S2s2m2s1d1o"]},
+  {"name":"BLADE","inherit":true,"rows":["28*1o1S2s2m2s1d1o"]},
+  {"name":"TIP","inherit":true,"rows":["4.2o4.","2*3.1o1S1d1o3.","3*2.1o1S1s1m1d1o2.","3*1.1o1S1s2m1s1d1o1.","5*1o1S2s2m2s1d1o"]}]},
+ {"id":"axe","name":"BATTLE AXE","attack":"chop","gems":[{"part":4,"x":19,"y":5,"w":2,"h":1},{"part":4,"x":19,"y":22,"w":2,"h":1}],"parts":[
+  {"name":"BUTT CAP","rows":["1.8o1.","3*1o1I7i1o","1o8k1o","1.8o1."]},
+  {"name":"GRIP","rows":["2*1o1L2l1b1o","1o4b1o","2*1o1L2l1b1o","1o4b1o","2*1o1L2l1b1o","1o4b1o","2*1o1L2l1b1o","1o4b1o","2*1o1L2l1b1o","1o4b1o","2*1o1L2l1b1o","1o4b1o"]},
+  {"name":"HAFT","rows":["3*1o1W2w1v1o","1o1W1v1w1v1o","6*1o1W2w1v1o","1o1W1v1w1v1o","6*1o1W2w1v1o","1o1W1v1w1v1o","6*1o1W2w1v1o","1o1W1v1w1v1o","3*1o1W2w1v1o"]},
+  {"name":"COLLAR","rows":["10o","1o1I7i1o","1o8k1o","10o"]},
+  {"name":"AXE HEAD","rows":["3.1o12.8o12.1o3.","3.1o12.1o6i1o12.1o3.","3.2o11.1o6i1o11.2o3.","2.1o1S1o11.1o6i1o11.1o1S1o2.",
+   "2.1o2S1o10.1o6i1o10.1o2S1o2.","2.1o3S1o9.1o2i2G2i1o9.1o3S1o2.","1.1o3S2s1o8.1o6i1o8.1o2s3S1o1.","1.1o1S5s2o6.1o6i1o6.2o5s1S1o1.",
+   "1.1o1S7s2o4.1o6i1o4.2o7s1S1o1.","1.1o1S9s4o1I6i1k4o9s1S1o1.","2*1.1o1S10s3m1I6i1k3m10s1S1o1.","4*1o1S11s3m1I6i1k3m11s1S1o",
+   "2*1.1o1S10s3m1I6i1k3m10s1S1o1.","1.1o1S9s4o1I6i1k4o9s1S1o1.","1.1o1S7s2o4.1o6i1o4.2o7s1S1o1.","1.1o1S5s2o6.1o6i1o6.2o5s1S1o1.",
+   "1.1o1S4d1o8.1o6i1o8.1o4d1S1o1.","2.1o1S2d1o9.1o2i2G2i1o9.1o2d1S1o2.","2.1o1S1d1o10.1o6i1o10.1o1d1S1o2.","2.1o1S1o11.1o6i1o11.1o1S1o2.",
+   "3.2o11.1o6i1o11.2o3.","3.1o12.1o6i1o12.1o3.","3.1o12.8o12.1o3."]},
+  {"name":"SPIKE","rows":["2*2.2o2.","4*1.1o1S1d1o1.","6*1o1S2s1d1o"]}]},
+ {"id":"spear","name":"SPEAR","attack":"thrust","snap":2,"tol":8,"speed":0.9,"gems":[{"part":4,"x":3,"y":2,"w":2,"h":2}],"parts":[
+  {"name":"BUTT SPIKE","rows":["6o","2*1o1I2i1k1o","4*1.1o1I1k1o1.","3*2.2o2."]},
+  {"name":"SHAFT","rows":["2*1o1W2w1v1o","1o1W1v1w1v1o","5*1o1W2w1v1o","1o1W1v1w1v1o","5*1o1W2w1v1o","1o1W1v1w1v1o","5*1o1W2w1v1o","1o1W1v1w1v1o","5*1o1W2w1v1o"]},
+  {"name":"GRIP","rows":["2*1o1L2l1b1o","1o4b1o","2*1o1L2l1b1o","1o4b1o","2*1o1L2l1b1o","1o4b1o","2*1o1L2l1b1o","1o4b1o","2*1o1L2l1b1o"]},
+  {"name":"SHAFT","rows":["2*1o1W2w1v1o","1o1W1v1w1v1o","5*1o1W2w1v1o","1o1W1v1w1v1o","5*1o1W2w1v1o","1o1W1v1w1v1o","5*1o1W2w1v1o","1o1W1v1w1v1o","3*1o1W2w1v1o"]},
+  {"name":"COLLAR","rows":["8o","1o1G5g1o","1o6y1o","1o1G5g1o","1o6y1o","8o"]},
+  {"name":"SPEARHEAD","rows":["2*6.2o6.","2*5.1o2m1o5.","2*4.1o1S2m1d1o4.","2*3.1o1S1s2m2d1o3.","2*2.1o1S2s2m3d1o2.","3*1.1o1S3s2m4d1o1.",
+   "6*1o1S4s2m5d1o","3*1.1o1S3s2m4d1o1.","2*2.1o1S2s2m3d1o2.","3*3.1o1S1s2m2d1o3.","2*4.1o1S2m1d1o4.","5.4o5."]}]}
+ ]}/*WEAPONS_END*/;
+
+const WEAPONS = WEAPON_DATA.weapons.map(wp => {
+  const parts = wp.parts.map(p => {
+    const rows = expandRows(p.rows, p.mirror, wp.id + ' ' + p.name);
+    return { name: p.name, inherit: !!p.inherit, w: rows[0].length, h: rows.length,
+             img: raster(rows, WEAPON_DATA.pal), hot: raster(rows, null, '#ff6a1a') };
+  });
+  // assembled preview, used on the title screen
+  const w = Math.max(...parts.map(p => p.w)), h = parts.reduce((s, p) => s + p.h, 0);
+  const preview = document.createElement('canvas'); preview.width = w; preview.height = h;
+  let y = h;
+  for (const p of parts) { y -= p.h; preview.getContext('2d').drawImage(p.img, (w - p.w) / 2, y); }
+  return { id: wp.id, name: wp.name, attack: wp.attack, parts, preview,
+           snap: wp.snap || 1.5, tol: wp.tol || 0, speed: wp.speed || 1, gems: wp.gems || [] };
+});
+let weaponIdx = 0;
+let weapon = WEAPONS[0];
+
+// Draws the visible columns [sx, sx+sw) of a part image at (x, y).
+function drawPiece(c, img, sx, sw, x, y) {
+  if (sw > 0) c.drawImage(img, sx, 0, sw, img.height, Math.floor(x), Math.floor(y), sw, img.height);
+}
+
+// ---------- enemy sprites ----------
+// Same row format as the weapons (see "pixel-art data format" above).
+// The Blender script (art/build_enemies.py) reads this block between the markers, so keep it valid JSON.
+const ENEMIES = /*ENEMIES_START*/[
+{"id":"slime","name":"BOG SLIME","label":"#a6f08a","eyes":["w"],"idle":"squash","burst":["#58c45a","#a6f08a","#2b6e33","#ffffff"],
+ "pal":{"o":"#16321a","g":"#58c45a","G":"#a6f08a","d":"#2b6e33","w":"#ffffff","k":"#111111"},
+ "mirror":false,"rows":[
+ "12.8o12.","9.3o8g3o9.","7.1o4G12g1o7.","6.1o1G1g2G14g1o6.","5.1o2G18g1o5.","4.1o1G21g1o4.","3.1o24g1o3.",
+ "2.1o5g3o9g3o6g1o2.","2.1o5g3w2o5g2o3w6g1o2.","1.1o6g5w5g5w7g1o1.","1.1o6g2k3w5g2k3w7g1o1.","1.1o6g2k3w5g2k3w7g1o1.",
+ "1.1o6g5w5g5w7g1o1.","1.1o1G27g1o1.","1.1o9g9o10g1o1.","1.1o9g1o1w5d1w1o10g1o1.","1.1o10g7o11g1o1.","1.1o28g1o1.",
+ "1o30g1o","1o1d28g1d1o","1o30d1o","1.30o1."]},
+{"id":"skeleton","name":"RATTLEBONE","label":"#e8e0c8","eyes":["r"],"undead":true,"idle":"bob","burst":["#e8e0c8","#a89e86","#ff4a3a","#ffffff"],
+ "pal":{"o":"#1a1420","b":"#e8e0c8","B":"#a89e86","k":"#120c14","r":"#ff4a3a","m":"#8a8a7a","R":"#a0603a"},
+ "mirror":false,"rows":[
+ "8.8o8.","7.1o8b1o7.","6.1o10b1o6.","6.1o9b1B1o6.","6.1o1b3k2b3k1B1o6.","6.1o1b1k1r1k2b1k1r1k1B1o6.",
+ "1.2o3.1o1b3k2b3k1B1o6.","1o2m1o2.1o4b2k3b1B1o6.","1o2m1o3.1o7b1B1o7.","1o2m1o3.1o1b1k1b1k1b1k1b1B1o7.",
+ "1o2m1o4.1o5b1B1o8.","1o2m1o6.1o2b1o10.","1o2m1o1.1o12b1o5.",
+ "1o2m2o1b1o1.1o6b1o1.1o1b1o4.","1o2m2o1b1o1.1o2.2b2.1o1.1o1b1o4.","1o2m2o1b1o1.1o6b1o1.1o1b1o4.",
+ "1o2m2o1b1o1.1o2.2b2.1o1.1o1b1o4.","1o2m2o1b1o1.1o6b1o1.1o1b1o4.","1o2m2o1b1o2.1o1.2b1.1o2.1o1b1o4.",
+ "1o3R1o1b1o4.2b4.1o1b1o4.","3.1o2b1o3.1o2b1o3.1o2b1o3.","3.4o1.1o6b1o1.4o3.","7.1o8b1o7.","7.1o2b1o2.1o2b1o7.",
+ "8.1o1b1o2.1o1b1o8.","8.1o1b1o2.1o1b1o8.","8.1o1b1o2.1o1b1o8.","8.1o1b1o2.1o1b1o8.","8.1o1b1o2.1o1b1o8.",
+ "7.1o3b1o1.1o3b1o6.",
+ "8.1o1b1o2.1o1b1o8.","8.1o1b1o2.1o1b1o8.","8.1o1b1o2.1o1b1o8.","8.1o1b1o2.1o1b1o8.","8.1o1b1o2.1o1b1o8.","8.1o1b1o2.1o1b1o8.",
+ "5.1o4b1o1.1o4b1o6.","5.6o1.6o6."]},
+{"id":"werewolf","name":"WEREWOLF","label":"#ffd23a","eyes":["y"],"idle":"bob","burst":["#6b5a4a","#9a8470","#3e3228","#ffd23a"],
+ "pal":{"o":"#140e0c","D":"#3e3228","f":"#6b5a4a","F":"#9a8470","y":"#ffd23a","n":"#1a1210","w":"#f2ead8","p":"#c0404a"},
+ "mirror":true,"rows":[
+ "5.1o10.","5.2o9.","5.1o1D1o8.","5.1o1D1F1o7.","5.1o1D2F7o","5.1o1D9f","4.1o1D10f","4.1o1D3f3o4f",
+ "4.1o1D2f1o3y1o1F2f","4.1o1D3f1o2y1o1F2f","4.1o1D4f2o1f3F","3.1o2D5f4F1n","3.1o1D5f6F","3.1o1D3f8o",
+ "3.1o1D2f1o1w1p1w1p1w3p","4.1o1D1f1o3p1w1p1w1p1w","4.1o1D2f8o","5.1o1D9f",
+ "3.5o5f3F","1.2o3D5f5F","1o2D8f5F","1o1D4f1o4f5F","1o1D3f1o5f5F","1o1D3f1o1D4f5F","1o1D3f1o1D5f4F",
+ "1o1D3f1o1D6f3F","1o1D3f1o1D9f","1o1D3f1o1D9f","1o1D3f1o1.1o1D7f","1.1w1o1w1o1w1.1o1D7f","1.1w1.1w1.1w2.1o1D4f2o",
+ "8.1o1D3f1o2.","8.1o1D3f1o2.","8.1o1D3f1o2.","8.1o1D3f1o2.","7.1o1D4f1o2.","6.1o1D5f1o2.","5.1o1w1o1w1o1w3o2."]},
+{"id":"ghoul","name":"GRAVE GHOUL","label":"#d8ff6a","eyes":["g"],"undead":true,"idle":"float","burst":["#4a3a5a","#6e5a82","#8fa88a","#d8ff6a"],
+ "pal":{"o":"#120c16","c":"#4a3a5a","C":"#6e5a82","q":"#1e1626","s":"#8fa88a","S":"#b5ccaa","g":"#d8ff6a","w":"#e8e0c8"},
+ "mirror":true,"rows":[
+ "10.4o","8.2o4c","7.1o1c1C4c","6.1o1c1C5c","6.1o1C2c4q","5.1o1C2c1q4s","5.1o1C1c1q1s2g2s","5.1o1C1c1q5s",
+ "5.1o1C1c1q1s4o","5.1o1C1c1q1s1w1s1w1s","6.1o1C1c1q4s","5.1o1C2c5q","4.1o1C8c","3.1o1C7c1C1c",
+ "2.1o1C2c1o5c1C1c","1.1o1C2c2o5c1C1c","1.1o1C2c1o1.1o6c","1.1o2s1o2.1o6c",
+ "1.1o2s1o2.1o1C5c","1.1o2s1o2.1o1C5c","1.1o2s1o2.1o1C5c","1.1o2s1o2.1o1C5c",
+ "1o4s1o1.1o1C5c","1o1S2s1S1o1.1o1C5c","1w1o1.1w1o2.1o1C5c","1w2.1w3.1o1C5c","7.1o1C5c",
+ "6.1o1C6c","6.1o1C6c","5.1o1C7c","5.1o1C7c","4.1o1C8c","4.1o1C3c1C4c","4.1o1c2o1c2o1c1o1.","5.1o2.1o2.1o2."]},
+{"id":"snake","name":"PIT COBRA","label":"#7fd8c8","eyes":["y"],"idle":"sway","burst":["#3aa0a0","#7fd8c8","#e8d890","#1f5c66"],
+ "pal":{"o":"#0e2226","e":"#3aa0a0","E":"#7fd8c8","h":"#1f5c66","u":"#e8d890","y":"#ffd23a","k":"#111111","p":"#e0303a"},
+ "mirror":true,"rows":[
+ "11.5o","9.2o5e","8.1o1e1E5e","6.2o1e1E6e","4.2o2e1E2e2y3e","3.1o3e1E3e1y1k3e","2.1o3e1E9e","2.1o2e3h6e2u",
+ "1.1o3e2h6e1u2o","1.1o11e2u1p","2.1o9e3u1p","3.1o8e2u1p1u","4.2o6e4u","6.2o4e4u",
+ "7.1o4e4u","7.1o4e4u","7.1o4e4u","3.6o3e4u","1.1o1e6E1o2e4u","1o9e1o1e4u","1o2e2h2e2h2e1o4u",
+ "1o11e1o3u","1o12u1o2u","1.1o12u1o1u","2.2o11e1o","1.1o2e2h2e2h2e2h2e","1.1o14e","2.1o13u","3.13o"]}
+]/*ENEMIES_END*/;
+
+function makeEnemy(e) {
+  const rows = expandRows(e.rows, e.mirror, e.id);
+  return Object.assign({}, e, {
+    w: rows[0].length, h: rows.length, img: raster(rows, e.pal), flash: raster(rows, null, '#fff'),
+    sil: raster(rows, null, '#06040a'),            // black silhouette (story intro)
+    glow: raster(rows, e.pal, null, e.eyes || [])  // just the eyes
+  });
+}
+const ENEMY_SPRITES = ENEMIES.map(makeEnemy);
+
+// Draws an enemy standing on gy, centred on cx, optionally squashed (sx/sy) or flashing white.
+function drawEnemy(e, cx, gy, sx, sy, flash) {
+  const dw = Math.max(1, Math.round(e.w * sx)), dh = Math.max(1, Math.round(e.h * sy));
+  ctx.drawImage(flash ? e.flash : e.img, Math.round(cx - dw / 2), Math.round(gy - dh), dw, dh);
+}
+
+// ---------- tiny 3x5 pixel font ----------
+const FONT = {
+  A:'010101111101101', B:'110101110101110', C:'011100100100011', D:'110101101101110',
+  E:'111100110100111', F:'111100110100100', G:'011100101101011', H:'101101111101101',
+  I:'111010010010111', J:'001001001101010', K:'101101110101101', L:'100100100100111',
+  M:'101111111101101', N:'110101101101101', O:'010101101101010', P:'110101110100100',
+  Q:'010101101110011', R:'110101110101101', S:'011100010001110', T:'111010010010010',
+  U:'101101101101111', V:'101101101101010', W:'101101111111101', X:'101101010101101',
+  Y:'101101010010010', Z:'111001010100111',
+  '0':'111101101101111', '1':'010110010010111', '2':'110001010100111', '3':'110001010001110',
+  '4':'101101111001001', '5':'111100110001110', '6':'011100111101111', '7':'111001010010010',
+  '8':'111101111101111', '9':'111101111001110',
+  '%':'101001010100101', '!':'010010010000010', '.':'000000000000010', ':':'000010000010000',
+  '-':'000000111000000', '/':'001001010100100', '?':'110001010000010', '+':'000010111010000',
+  '<':'001010100010001', '>':'100010001010100', ',':'000000000010100'
+};
+function textW(s, sc) { return s.length * 4 * sc - sc; }
+function drawText(s, x, y, col, sc = 1, align = 'left', shadow = true) {
+  s = String(s).toUpperCase();
+  if (align === 'center') x = Math.round(x - textW(s, sc) / 2);
+  else if (align === 'right') x = Math.round(x - textW(s, sc));
+  if (shadow) rawText(s, x + sc, y + sc, '#000', sc);
+  rawText(s, x, y, col, sc);
+}
+function rawText(s, x, y, col, sc) {
+  ctx.fillStyle = col;
+  for (let i = 0; i < s.length; i++) {
+    const g = FONT[s[i]];
+    if (!g) continue;
+    for (let k = 0; k < 15; k++) {
+      if (g[k] === '1') ctx.fillRect(x + i * 4 * sc + (k % 3) * sc, y + Math.floor(k / 3) * sc, sc, sc);
+    }
+  }
+}
+
+// ---------- background (drawn once) ----------
+const bg = document.createElement('canvas');
+bg.width = W; bg.height = H;
+(function () {
+  const b = bg.getContext('2d');
+  px(b, 0, 0, W, H, '#140d12');
+  for (let row = 0; row * 7 < FLOOR_Y; row++) {
+    const off = (row % 2) * 7;
+    for (let col = -1; col * 14 < W + 14; col++) {
+      const x = col * 14 + off, y = row * 7, v = Math.random();
+      px(b, x + 1, y + 1, 12, 5, v < 0.15 ? '#3a2830' : v < 0.6 ? '#2b1e25' : '#251a20');
+      px(b, x + 1, y + 1, 12, 1, '#36262e');
+    }
+  }
+  px(b, 0, FLOOR_Y, W, H - FLOOR_Y, '#1d1519');
+  px(b, 0, FLOOR_Y, W, 1, '#4a343c');
+  for (let i = 0; i < 40; i++) px(b, Math.random() * W, FLOOR_Y + 2 + Math.random() * 12, 2, 1, '#2a1f24');
+  const g = b.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, 'rgba(0,0,0,0.6)');
+  g.addColorStop(0.6, 'rgba(0,0,0,0.1)');
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  b.fillStyle = g; b.fillRect(0, 0, W, H);
+})();
+
+function drawGlow() {
+  const f = 0.28 + 0.06 * Math.sin(T * 9) + 0.04 * Math.sin(T * 23);
+  const g = ctx.createRadialGradient(80, FLOOR_Y, 4, 80, FLOOR_Y, 95);
+  g.addColorStop(0, `rgba(255,120,30,${f})`);
+  g.addColorStop(1, 'rgba(255,80,20,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawAnvil() {
+  for (let r = 0; r < 4; r++) px(ctx, 56 - (8 - r * 2), BASE_Y + r, 8 - r * 2, 1, r ? C.anv : C.anvHi);
+  px(ctx, 56, BASE_Y, 48, 5, C.anv);
+  px(ctx, 56, BASE_Y, 48, 1, C.anvHi);
+  px(ctx, 56, BASE_Y + 4, 48, 1, C.anvDk);
+  px(ctx, 104, BASE_Y, 4, 3, C.anv);
+  px(ctx, 68, BASE_Y + 5, 24, 4, C.anvDk);
+  px(ctx, 72, BASE_Y + 9, 16, 7, C.anv);
+  px(ctx, 72, BASE_Y + 9, 1, 7, C.anvHi);
+  px(ctx, 62, BASE_Y + 16, 36, 4, C.anv);
+  px(ctx, 62, BASE_Y + 16, 36, 1, C.anvHi);
+  if (state === 'building' && stack.length === 0) {
+    const a = 0.5 + 0.5 * Math.sin(T * 6);
+    ctx.globalAlpha = 0.5 + a * 0.5;
+    px(ctx, ANVIL_SLOT.x, BASE_Y, ANVIL_SLOT.w, 1, '#ff9a3a');
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ---------- audio (all synthesized) ----------
+let AC = null, master = null, noiseBuf = null;
+function initAudio() {
+  if (AC) { if (AC.state === 'suspended') AC.resume(); return; }
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return;
+  AC = new Ctx();
+  master = AC.createGain(); master.gain.value = 0.5; master.connect(AC.destination);
+  noiseBuf = AC.createBuffer(1, AC.sampleRate, AC.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+function tone(freq, dur, type, vol, t0 = 0, freqEnd) {
+  if (!AC) return;
+  const t = AC.currentTime + t0; dur = Math.max(0.05, dur);
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (freqEnd) o.frequency.exponentialRampToValueAtTime(freqEnd, t + dur);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(vol, t + 0.004);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(master);
+  o.start(t); o.stop(t + dur + 0.05);
+}
+function noise(dur, type, freq, q, vol, t0 = 0, freqEnd) {
+  if (!AC) return;
+  const t = AC.currentTime + t0;
+  const s = AC.createBufferSource(); s.buffer = noiseBuf; s.loop = true;  // loop: the buffer is 1 s, ambience runs longer
+  const f = AC.createBiquadFilter(); f.type = type; f.Q.value = q;
+  f.frequency.setValueAtTime(freq, t);
+  if (freqEnd) f.frequency.exponentialRampToValueAtTime(freqEnd, t + dur);
+  const g = AC.createGain();
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  s.connect(f); f.connect(g); g.connect(master);
+  s.start(t); s.stop(t + dur + 0.05);
+}
+const sfx = {
+  // Hammer on metal: the cleaner the drop, the higher and purer the ring.
+  clang(acc) {
+    const base = 220 + acc * 380, wobble = (1 - acc) * 0.06;
+    noise(0.06, 'highpass', 2000, 0.7, 0.6);
+    tone(90, 0.12, 'sine', 0.6, 0, 45);
+    [1, 2.76, 5.4, 8.9].forEach((m, i) =>
+      tone(base * m * (1 + (Math.random() - 0.5) * wobble), 0.25 + acc * 0.5 - i * 0.04, i ? 'sine' : 'triangle', 0.25 / (i + 1)));
+  },
+  ting() {
+    noise(0.05, 'highpass', 3000, 0.7, 0.5);
+    tone(80, 0.12, 'sine', 0.5, 0, 40);
+    [1, 2.01, 3.0, 4.1].forEach((m, i) => tone(880 * m, 1.4 - i * 0.25, 'sine', 0.22 / (i + 1)));
+    tone(1760, 0.6, 'triangle', 0.08, 0.08);
+  },
+  hiss() { noise(0.35, 'bandpass', 4000, 1.5, 0.35, 0.02, 1500); },
+  whoosh() { noise(0.3, 'bandpass', 300, 2, 0.6, 0, 2500); },
+  hit() { tone(140, 0.3, 'square', 0.3, 0, 40); noise(0.25, 'lowpass', 1200, 1, 0.8); },
+  splat() { noise(0.4, 'lowpass', 900, 2, 0.8, 0, 120); tone(200, 0.3, 'sine', 0.4, 0, 50); },
+  block() { this.clang(0.15); tone(60, 0.25, 'sawtooth', 0.3, 0, 30); },
+  shatter() {
+    noise(0.5, 'highpass', 1500, 0.5, 0.6, 0, 6000);
+    for (let i = 0; i < 6; i++) tone(1500 + Math.random() * 2500, 0.15, 'square', 0.05, i * 0.04);
+    tone(70, 0.4, 'sawtooth', 0.3, 0, 30);
+  },
+  thump() { tone(70, 0.3, 'sine', 0.6, 0, 35); },
+  blip() { tone(660, 0.06, 'square', 0.08); tone(990, 0.05, 'square', 0.05, 0.04); },
+  tick() { tone(900 + Math.random() * 300, 0.03, 'square', 0.025); },          // typewriter
+  wind() { noise(4, 'bandpass', 500, 0.8, 0.14, 0, 220); noise(4, 'lowpass', 300, 0.5, 0.1, 0.6); },
+  dread() { tone(55, 4.5, 'sawtooth', 0.05); tone(58.3, 4.5, 'sawtooth', 0.04); tone(110, 3.5, 'sine', 0.05, 0.6); },
+  eye() { tone(240, 0.25, 'sine', 0.06, 0, 180); },
+  dawn() {                                       // the ending: a warm pad and a rising major arpeggio
+    tone(262, 4, 'sine', 0.06); tone(392, 4, 'sine', 0.04, 0.2);
+    [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, 0.9, 'triangle', 0.06, 0.3 + i * 0.25));
+  },
+  bookOpen() { noise(0.35, 'lowpass', 700, 1, 0.35, 0, 150); tone(110, 0.25, 'sine', 0.25, 0, 70); tone(880, 0.6, 'sine', 0.05, 0.15); },
+  rune(i) { tone(523 * Math.pow(2, i / 5), 0.35, 'sine', 0.1); tone(1046 * Math.pow(2, i / 5), 0.2, 'triangle', 0.03); },   // rising note per dot
+  chime() { [784, 988, 1175, 1568].forEach((f, i) => tone(f, 0.6, 'sine', 0.09, i * 0.07)); tone(2349, 0.9, 'triangle', 0.04, 0.3); },
+  crack() {
+    noise(0.25, 'highpass', 2500, 0.7, 0.5);
+    for (let i = 0; i < 5; i++) tone(2000 + Math.random() * 2000, 0.06, 'square', 0.04, i * 0.03);
+    tone(90, 0.25, 'sawtooth', 0.2, 0, 40);
+  },
+  gemSet() { tone(1568, 0.5, 'sine', 0.1); tone(2093, 0.7, 'sine', 0.06, 0.08); },
+  element(id) {                                  // the rune's voice when an enchanted strike lands
+    if (id === 'fire') noise(0.5, 'bandpass', 900, 0.6, 0.45, 0, 250);
+    else if (id === 'frost') [1568, 2093, 2637].forEach((f, i) => tone(f, 0.4, 'sine', 0.07, i * 0.05));
+    else if (id === 'lightning') { tone(1400, 0.25, 'sawtooth', 0.1, 0, 90); noise(0.2, 'highpass', 3000, 0.5, 0.4); }
+    else if (id === 'holy') [523, 659, 784, 1047].forEach(f => tone(f, 0.9, 'sine', 0.06));
+    else if (id === 'venom') noise(0.45, 'bandpass', 3000, 3, 0.35, 0, 1200);
+  },
+  win() {
+    [523, 659, 784].forEach((f, i) => tone(f, 0.22, 'square', 0.1, i * 0.11));
+    tone(1047, 0.7, 'square', 0.1, 0.33);
+  },
+  lose() { [392, 330, 262, 196].forEach((f, i) => tone(f, 0.35, 'sawtooth', 0.1, i * 0.18)); }
+};
+
+// ---------- game state ----------
+let state = 'story', T = 0;   // story -> title -> building -> enchant -> showdown -> result
+let titleFade = 0;             // black overlay fading out as the title appears
+let stack = [], cur = null, partIdx = 0, phase = '', phaseT = 0;
+let debris = [], sparks = [], popups = [], shake = 0;
+let power = 0, chance = 0, won = false;
+let sd = { on: false };
+let lastEnemy = null;
+const slain = new Set();       // ids of beasts beaten this hunt; all of them unlocks the ending
+let endingDue = false;
+let res = null, resultT = 0;
+let autoBuild = false, cheated = false;   // cheat: the rest of the weapon forges itself, perfectly
+
+function cheat() {
+  if (state !== 'building' || autoBuild || phase === 'broken') return;
+  autoBuild = cheated = true;
+  sfx.blip();
+  popups.push({ t: 'AUTO-FORGE!', x: 80, y: 40, col: C.accent, life: 1.2 });
+}
+const spr = document.createElement('canvas'); spr.width = W; spr.height = H;
+const sprGlow = document.createElement('canvas'); sprGlow.width = W; sprGlow.height = H;   // rune-coloured aura
+
+function topY() { return stack.length ? stack[stack.length - 1].y : BASE_Y; }
+function prevRef() { return stack.length ? stack[stack.length - 1] : ANVIL_SLOT; }
+function avgAcc() { return stack.length ? stack.reduce((s, p) => s + p.acc, 0) / stack.length : 0; }
+const ease = t => 1 - Math.pow(1 - Math.min(1, Math.max(0, t)), 3);
+
+function startGame() {
+  stack = []; debris = []; sparks = []; popups = [];
+  partIdx = 0; sd = { on: false }; res = null; en = null;
+  weapon = WEAPONS[weaponIdx];
+  buildSlow = frostSlow; frostSlow = 0;          // a frost rune from the last fight slows this build
+  autoBuild = cheated = false;
+  state = 'building';
+  spawnPart();
+}
+
+function toTitle() {
+  stack = []; debris = []; sparks = []; popups = [];
+  sd = { on: false }; res = null; cur = null; en = null;
+  state = 'title';
+}
+
+function changeWeapon(d) {
+  weaponIdx = (weaponIdx + d + WEAPONS.length) % WEAPONS.length;
+  weapon = WEAPONS[weaponIdx];
+  sfx.blip();
+}
+
+// A part in play shows the columns [sx, sx + w) of its sprite; cuts move sx and shrink w.
+function spawnPart() {
+  const def = weapon.parts[partIdx];
+  let sx = 0, w = def.w;
+  const below = stack[stack.length - 1];
+  if (def.inherit && below && below.img.width === def.w) { sx = below.sx; w = below.w; }
+  const fromRight = partIdx % 2 === 1;
+  cur = {
+    def, img: def.img, hot: def.hot, sx, w, h: def.h,
+    x: fromRight ? W - w - 3 : 3,
+    y: topY() - def.h - 18,
+    landY: topY() - def.h,
+    dir: fromRight ? -1 : 1,
+    speed: (50 + partIdx * 14) * weapon.speed * (1 - buildSlow),
+    vy: 0
+  };
+  phase = 'slide';
+}
+
+function drop() {
+  cur.x = Math.round(cur.x);
+  cur.vy = 80;
+  phase = 'fall';
+}
+
+// A flying piece of metal showing columns [sx, sx + w) of img.
+function mkDebris(img, sx, w, x, y, vx, vy, vr) {
+  return { img, sx, w, h: img.height, x, y, vx, vy, rot: 0, vr };
+}
+
+function land() {
+  cur.y = cur.landY;
+  const p = prevRef(), w0 = cur.w;
+  let off = (cur.x + w0 / 2) - (p.x + p.w / 2);
+  const reach = (p.w + w0) / 2;             // beyond this the part misses entirely
+  // accuracy scale: capped so wide parts aren't free points, floored by the weapon's forgiveness
+  const tol = Math.max(Math.min(reach, 12), weapon.tol);
+  let acc, perfect = false;
+
+  if (Math.abs(off) <= weapon.snap) {
+    cur.x = Math.round(p.x + p.w / 2 - w0 / 2);
+    acc = 1; perfect = true;
+  } else {
+    const cut = Math.round(Math.abs(off));
+    if (Math.abs(off) >= reach || w0 - cut < 2) { shatter(); return; }
+    acc = Math.max(0, 1 - Math.abs(off) / tol);
+    if (off > 0) {
+      debris.push(mkDebris(cur.img, cur.sx + w0 - cut, cut, cur.x + w0 - cut, cur.y, 25, -20, 0));
+      cur.w = w0 - cut;
+    } else {
+      debris.push(mkDebris(cur.img, cur.sx, cut, cur.x, cur.y, -25, -20, 0));
+      cur.x += cut; cur.sx += cut; cur.w = w0 - cut;
+    }
+    sfx.hiss();
+  }
+
+  stack.push({ name: cur.def.name, img: cur.img, hot: cur.hot, sx: cur.sx, x: cur.x, y: cur.y, w: cur.w, h: cur.h, acc, heat: 1 });
+  const cx = cur.x + cur.w / 2, cy = cur.y + cur.h;
+  spawnSparks(cx, cy, 8 + Math.round(acc * 14), ['#fff', '#ffe27a', '#ff9a3a', '#ff5a1a'], 50 + acc * 50, true);
+  if (perfect) {
+    sfx.ting();
+    popups.push({ t: 'PERFECT!', x: cx, y: cur.y - 10, col: C.accent, life: 0.9 });
+    shake = 1.5;
+  } else {
+    sfx.clang(acc);
+    popups.push({ t: Math.round(acc * 100) + '%', x: cx, y: cur.y - 10, col: acc > 0.75 ? C.text : C.red, life: 0.9 });
+    shake = 2.5;
+  }
+  cur = null;
+  phase = 'wait';
+  phaseT = partIdx === weapon.parts.length - 1 ? 0.8 : 0.35;
+}
+
+function shatter() {
+  const parts = stack.map(p => ({ name: p.name, acc: p.acc }));
+  parts.push({ name: cur.def.name, acc: null });
+  debris.push(mkDebris(cur.img, cur.sx, cur.w, cur.x, cur.y, (Math.random() - 0.5) * 80, -40, (Math.random() - 0.5) * 10));
+  stack.forEach(p => debris.push(mkDebris(p.img, p.sx, p.w, p.x, p.y,
+    (Math.random() - 0.5) * 140, -80 - Math.random() * 120, (Math.random() - 0.5) * 12)));
+  spawnSparks(cur.x + cur.w / 2, cur.y + cur.h, 24, ['#fff', '#ffcc33', '#ff7a1a'], 90, false);
+  popups.push({ t: 'SHATTERED!', x: 80, y: 110, col: C.red, life: 1.4 });
+  res = { shattered: true, won: false, power: Math.round(avgAcc() * 100), chance: 0, parts };
+  stack = []; cur = null;
+  phase = 'broken'; phaseT = 1.6; shake = 6;
+  sfx.shatter();
+}
+
+function spawnSparks(x, y, n, cols, spd, up) {
+  for (let i = 0; i < n; i++) {
+    const a = up ? -Math.PI * Math.random() : Math.random() * Math.PI * 2;
+    const s = spd * (0.4 + Math.random());
+    sparks.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.4 + Math.random() * 0.4, col: cols[i % cols.length] });
+  }
+}
+
+function beginShowdown() {
+  power = avgAcc();
+  const s = spr.getContext('2d');
+  s.clearRect(0, 0, W, H);
+  stack.forEach(p => drawPiece(s, p.img, p.sx, p.w, p.x, p.y));
+  if (en && en.gemLook) drawGems(s, en.gemLook);
+  const ench = en && en.ok ? en : null;
+  if (ench) {                                    // aura: the weapon's silhouette in the rune's colour
+    const g = sprGlow.getContext('2d');
+    g.clearRect(0, 0, W, H); g.drawImage(spr, 0, 0);
+    g.globalCompositeOperation = 'source-in'; g.fillStyle = ench.rune.col; g.fillRect(0, 0, W, H);
+    g.globalCompositeOperation = 'source-over';
+  }
+  const grip = stack.find(p => p.name === 'GRIP') || stack[1];
+  const py0 = grip.y + grip.h / 2;
+  const L = py0 - stack[stack.length - 1].y;   // grip to tip
+  // Where the grip rests during the showdown, chosen so the tip reaches the foe (who stands at x = 124).
+  // swing/chop: tip lands at x ~128 when rotated 1.75 rad (and the arm steps in 12 px).
+  // thrust: the weapon lowers to horizontal and lunges 14 px so the tip lands at x ~118.
+  const baseX = weapon.attack === 'thrust' ? 118 - L - 14 : 128 - 12 - L * Math.sin(1.75);
+  // the next foe: a beast not yet slain if possible, and never the same one twice in a row
+  let pool = ENEMY_SPRITES.filter(e => !slain.has(e.id) && e !== lastEnemy);
+  if (!pool.length) pool = ENEMY_SPRITES.filter(e => !slain.has(e.id));
+  if (!pool.length) pool = ENEMY_SPRITES.filter(e => e !== lastEnemy);
+  const pick = pool[Math.floor(Math.random() * pool.length)];
+  lastEnemy = pick;
+
+  // win chance: build quality squared, plus whatever the runes add
+  const mods = [];
+  let bonus = 0, second = 0, venomOnLoss = 0;
+  if (poison > 0) { bonus += poison; mods.push({ t: 'POISONED FOE +' + pct(poison), col: '#7cff4a' }); poison = 0; }
+  if (ench) {
+    const r = ench.rune, v = r.vals[ench.strength];
+    if (r.id === 'fire') { bonus += v; mods.push({ t: 'FIRE +' + pct(v), col: r.col }); }
+    else if (r.id === 'holy') {
+      if (pick.undead) { bonus += v; mods.push({ t: 'HOLY +' + pct(v) + ' VS UNDEAD', col: r.col }); }
+      else mods.push({ t: 'HOLY: NO UNDEAD TO SMITE', col: C.dim });
+    }
+    else if (r.id === 'lightning') { second = v; mods.push({ t: 'LIGHTNING: 2ND STRIKE AT ' + pct(v), col: r.col }); }
+    else if (r.id === 'frost') { frostSlow = v; mods.push({ t: 'FROST: NEXT FORGE -' + pct(v) + ' SPEED', col: r.col }); }
+    else if (r.id === 'venom') { venomOnLoss = v; mods.push({ t: 'VENOM: IF YOU FALL, NEXT +' + pct(v), col: r.col }); }
+  }
+  chance = Math.min(1, power * power + bonus);
+
+  sd = {
+    on: true, phase: 'enter', t: 0, st: 0, ot: 0, enemy: pick, attack: weapon.attack,
+    px0: grip.x + grip.w / 2, py0, baseX, L,
+    dx: 0, dy: 0, ang: 0, mx: 200, mflash: 0, sq: 1, jump: 0, alive: true, resolved: false, hitT: 0,
+    ench, mods, second, venomOnLoss, poisoned: false
+  };
+  state = 'showdown';
+  sfx.whoosh();
+}
+
+function resolveStrike() {
+  sd.resolved = true;
+  won = Math.random() < chance;
+  let zapped = false;
+  if (!won && sd.second) { won = Math.random() < chance * sd.second; zapped = won; }   // lightning's second strike
+  const hx = sd.mx - 12, hy = FLOOR_Y - 14, py = FLOOR_Y - sd.enemy.h - 26;
+  if (won) {
+    sd.mflash = 0.35; shake = sd.attack === 'chop' ? 7 : 5;
+    sfx.hit();
+    spawnSparks(hx, hy, 26, sd.ench ? [sd.ench.rune.col, sd.ench.rune.hi, '#fff'] : ['#fff', '#ffe27a', C.slHi], 100, false);
+    if (sd.ench) sfx.element(sd.ench.rune.id);
+    popups.push({ t: zapped ? 'LIGHTNING!' : 'HIT!', x: sd.mx, y: py, col: zapped ? '#ffe03a' : C.green, life: 1 });
+  } else {
+    shake = 3;
+    sfx.block();
+    spawnSparks(hx, hy, 14, ['#fff', '#ffcc33'], 80, false);
+    popups.push({ t: 'BOUNCED OFF!', x: sd.mx - 8, y: py, col: C.red, life: 1 });
+    if (sd.venomOnLoss) { poison = sd.venomOnLoss; sd.poisoned = true; }    // the venom lingers for the next fight
+  }
+}
+
+function toResult(didWin) {
+  state = 'result'; resultT = 0;
+  if (didWin) {                                  // the last beast slain unlocks the ending
+    const before = slain.size;
+    slain.add(sd.enemy.id);
+    if (slain.size === ENEMY_SPRITES.length && before < slain.size) endingDue = true;
+  }
+  res = {
+    shattered: false, won: didWin,
+    power: Math.round(power * 100), chance: Math.round(chance * 100), cheated,
+    parts: stack.map(p => ({ name: p.name, acc: p.acc })),
+    rune: sd.poisoned ? { t: 'VENOM: NEXT FOE WEAKENED', col: '#7cff4a' }
+        : !en || en.skipped ? { t: 'NO RUNE', col: C.dim }
+        : en.ok ? { t: 'RUNE: ' + en.rune.name + ' - ' + STRENGTH[en.strength], col: en.rune.col }
+        : { t: 'RUNE CRACKED', col: '#8a8a94' }
+  };
+}
+
+function rankFor(r) {
+  if (r.shattered) return 'SCRAP';
+  const p = r.power;
+  return p >= 95 ? 'LEGENDARY' : p >= 85 ? 'MASTERWORK' : p >= 70 ? 'FINE' : p >= 50 ? 'CRUDE' : 'SCRAP';
+}
+
+// ---------- input ----------
+function action() {
+  if (state === 'story') storyAdvance();
+  else if (state === 'title') startGame();
+  else if (state === 'building' && phase === 'slide') drop();
+  else if (state === 'enchant') enchantSkip();
+  else if (state === 'showdown' && sd.phase === 'ready') { sd.phase = 'strike'; sd.st = 0; sfx.whoosh(); }
+  else if (state === 'result' && resultT > 0.6) {
+    if (endingDue) { endingDue = false; playEnding(); } else startGame();
+  }
+}
+function press() { initAudio(); action(); }
+// Left/right picks the weapon on the title screen; from the result screen it returns to the title.
+function pick(d) {
+  initAudio();
+  if (state === 'title') changeWeapon(d);
+  else if (state === 'result' && resultT > 0.6 && !endingDue) { toTitle(); changeWeapon(d); }
+}
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) press(); }
+  else if (e.code === 'ArrowLeft') { e.preventDefault(); pick(-1); }
+  else if (e.code === 'ArrowRight') { e.preventDefault(); pick(1); }
+  else if (e.code === 'Escape' && state === 'story') { initAudio(); storySkip(); }
+  else if (e.code === 'KeyC') { initAudio(); cheat(); }
+});
+// pointer position in game pixels
+function gamePoint(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width * W, y: (e.clientY - r.top) / r.height * H };
+}
+cv.addEventListener('pointermove', e => { if (state === 'enchant') enchantMove(gamePoint(e)); });
+cv.addEventListener('pointerup', () => { if (state === 'enchant') enchantUp(); });
+cv.addEventListener('pointercancel', () => { if (state === 'enchant') enchantUp(); });
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  const { x, y } = gamePoint(e);
+  // enchanting: pressing on the start dot begins the trace (taps elsewhere do nothing)
+  if (state === 'enchant') {
+    initAudio();
+    try { cv.setPointerCapture(e.pointerId); } catch (err) { /* keep tracing even if capture is refused */ }
+    enchantDown({ x, y });
+  }
+  // story: tapping the "SKIP" corner skips, anywhere else advances
+  else if (state === 'story' && st.begun && x > W - 44 && y < 14) { initAudio(); storySkip(); }
+  // building: the "C: CHEAT" label in the bottom-left corner
+  else if (state === 'building' && x < 44 && y > 222) { initAudio(); cheat(); }
+  // on menus, tapping the outer thirds changes weapon; anywhere else acts like Space
+  else if ((state === 'title' || state === 'result') && (x < W / 3 || x > W * 2 / 3)) pick(x < W / 3 ? -1 : 1);
+  else press();
+});
+
+// ---------- update ----------
+function update(dt) {
+  T += dt;
+  shake = Math.max(0, shake - dt * 12);
+  stack.forEach(p => { p.heat = Math.max(0, p.heat - dt * 1.2); });
+  titleFade = Math.max(0, titleFade - dt / 0.6);
+
+  if (state === 'story') updateStory(dt);
+  else if (state === 'building') {
+    if (autoBuild && cur && (phase === 'slide' || phase === 'fall')) {
+      const p = prevRef();                       // cheat: line the part up dead-centre and let it fall
+      cur.x = Math.round(p.x + p.w / 2 - cur.w / 2);
+      if (phase === 'slide') drop();
+    }
+    if (phase === 'slide') {
+      cur.x += cur.dir * cur.speed * dt;
+      if (cur.x < 2) { cur.x = 2; cur.dir = 1; }
+      if (cur.x > W - 2 - cur.w) { cur.x = W - 2 - cur.w; cur.dir = -1; }
+    } else if (phase === 'fall') {
+      cur.vy += 900 * dt;
+      cur.y += cur.vy * dt;
+      if (cur.y >= cur.landY) land();
+    } else if (phase === 'wait') {
+      phaseT -= dt;
+      if (phaseT <= 0) {
+        partIdx++;
+        if (partIdx < weapon.parts.length) spawnPart(); else beginEnchant();
+      }
+    } else if (phase === 'broken') {
+      phaseT -= dt;
+      if (phaseT <= 0) { state = 'result'; resultT = 0; }
+    }
+  } else if (state === 'enchant') {
+    updateEnchant(dt);
+  } else if (state === 'showdown') {
+    updateShowdown(dt);
+  } else if (state === 'result') {
+    resultT += dt;
+  }
+
+  for (const d of debris) { d.vy += 500 * dt; d.x += d.vx * dt; d.y += d.vy * dt; d.rot += d.vr * dt; }
+  debris = debris.filter(d => d.y < H + 40);
+  for (const s of sparks) { s.vy += 200 * dt; s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt; }
+  sparks = sparks.filter(s => s.life > 0);
+  for (const p of popups) { p.y -= 18 * dt; p.life -= dt; }
+  popups = popups.filter(p => p.life > 0);
+}
+
+function updateShowdown(dt) {
+  sd.t += dt;
+  if (sd.mflash > 0) sd.mflash -= dt;
+  const baseDx = sd.baseX - sd.px0;
+
+  if (sd.phase === 'enter') {
+    const e = ease(sd.t / 0.9);
+    sd.dx = baseDx * e;
+    sd.mx = 200 + (124 - 200) * e;
+    if (sd.t >= 0.9) { sd.phase = 'ready'; sfx.thump(); shake = 2; }
+  } else if (sd.phase === 'strike') {
+    sd.st += dt;
+    const s = sd.st;
+    if (sd.attack === 'thrust') {
+      // lower to horizontal at the foe's chest height, draw back, then lunge
+      sd.hitT = 0.28;
+      const dropY = 208 - sd.py0;
+      if (s < 0.18) {
+        const e = ease(s / 0.18);
+        sd.ang = 1.5708 * e; sd.dy = dropY * e; sd.dx = baseDx - 8 * e;
+      } else if (s < sd.hitT) {
+        sd.dx = baseDx - 8 + 22 * ease((s - 0.18) / 0.1);
+      } else {
+        if (!sd.resolved) resolveStrike();
+        if (!won) { const e = ease((s - sd.hitT) / 0.3); sd.dx = baseDx + 14 - 24 * e; sd.ang = 1.5708 - 0.35 * e; }
+      }
+    } else {
+      // swing (sword) or chop (axe: bigger, slower wind-up)
+      const chop = sd.attack === 'chop';
+      const wind = chop ? 0.2 : 0.12, back = chop ? -0.6 : -0.35;
+      sd.hitT = wind + (chop ? 0.12 : 0.14);
+      if (s < wind) {
+        sd.ang = back * ease(s / wind);
+      } else if (s < sd.hitT) {
+        const e = ease((s - wind) / (sd.hitT - wind));
+        sd.ang = back + (1.75 - back) * e;
+        sd.dx = baseDx + 12 * e;
+      } else {
+        if (!sd.resolved) resolveStrike();
+        if (!won) { const e = ease((s - sd.hitT) / 0.3); sd.ang = 1.75 - 2.0 * e; sd.dx = baseDx + 12 - 18 * e; }
+      }
+    }
+    if (sd.ench && s < sd.hitT + 0.15) {          // enchanted: the tip trails rune sparks
+      const r = sd.ench.rune;
+      sparks.push({ x: sd.px0 + sd.dx + Math.sin(sd.ang) * sd.L, y: sd.py0 + sd.dy - Math.cos(sd.ang) * sd.L,
+                    vx: (Math.random() - 0.5) * 20, vy: (Math.random() - 0.5) * 20, life: 0.35, col: Math.random() < 0.5 ? r.col : r.hi });
+    }
+    if (sd.resolved && s >= sd.hitT + 0.5) {
+      sd.phase = 'outcome'; sd.ot = 0;
+      if (!won) sfx.lose();
+    }
+  } else if (sd.phase === 'outcome') {
+    sd.ot += dt;
+    if (won) {
+      if (sd.alive) {
+        sd.sq = Math.max(0.12, 1 - sd.ot / 0.35);
+        if (sd.ot >= 0.35) {
+          sd.alive = false; shake = 4;
+          spawnSparks(sd.mx, FLOOR_Y - 6, 40, sd.enemy.burst, 110, true);
+          sfx.splat(); sfx.win();
+        }
+      }
+    } else {
+      sd.jump = sd.ot < 0.9 ? Math.abs(Math.sin(sd.ot * 7)) * 10 : 0;
+    }
+    if (sd.ot >= 1.6) toResult(won);
+  }
+}
+
+// ---------- render ----------
+const blink = () => Math.floor(T * 2.5) % 2 === 0;
+
+function render() {
+  if (state === 'story') { renderStory(); return; }
+  ctx.save();
+  if (shake > 0) ctx.translate(Math.round((Math.random() * 2 - 1) * shake), Math.round((Math.random() * 2 - 1) * shake));
+
+  ctx.drawImage(bg, 0, 0);
+  drawGlow();
+  drawAnvil();
+
+  if (sd.on) {
+    // finished weapon, drawn as one sprite so it can swing
+    ctx.save();
+    ctx.translate(Math.round(sd.px0 + sd.dx), Math.round(sd.py0 + sd.dy));
+    ctx.rotate(sd.ang);
+    if (sd.ench) {                               // pulsing rune-coloured outline
+      ctx.globalAlpha = 0.35 + 0.2 * Math.sin(T * 6);
+      for (const [ox, oy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) ctx.drawImage(sprGlow, -Math.round(sd.px0) + ox, -Math.round(sd.py0) + oy);
+      ctx.globalAlpha = 1;
+    }
+    ctx.drawImage(spr, -Math.round(sd.px0), -Math.round(sd.py0));
+    ctx.restore();
+    if (sd.alive) {
+      const e = sd.enemy;
+      let sx = 1, sy = 1, ox = 0, oy = 0;
+      if (e.idle === 'squash') { const b = Math.sin(T * 5); sy = 1 + 0.06 * b; sx = 1 - 0.04 * b; }
+      else if (e.idle === 'bob') oy = Math.sin(T * 4) > 0 ? -1 : 0;
+      else if (e.idle === 'float') oy = -Math.round(2 + 2 * Math.sin(T * 3));
+      else if (e.idle === 'sway') ox = Math.round(1.5 * Math.sin(T * 3));
+      sy *= sd.sq; sx *= 1 + (1 - sd.sq) * 0.7;      // death squash
+      drawEnemy(e, sd.mx + ox, FLOOR_Y + oy - Math.round(sd.jump), sx, sy, sd.mflash > 0 && Math.floor(T * 30) % 2 === 0);
+    }
+  } else if (state === 'title') {
+    // the chosen weapon, assembled, standing on the anvil
+    const pv = weapon.preview;
+    ctx.drawImage(pv, Math.round(80 - pv.width / 2), BASE_Y - pv.height);
+  } else {
+    for (const p of stack) {
+      drawPiece(ctx, p.img, p.sx, p.w, p.x, p.y);
+      if (p.heat > 0) {          // fresh from the forge: glows orange, cooling
+        ctx.globalAlpha = p.heat * 0.6;
+        drawPiece(ctx, p.hot, p.sx, p.w, p.x, p.y);
+        ctx.globalAlpha = 1;
+      }
+    }
+    if (cur) drawPiece(ctx, cur.img, cur.sx, cur.w, cur.x, cur.y);
+    if (state === 'enchant' && en.gemLook) drawGems(ctx, en.gemLook);
+  }
+
+  for (const d of debris) {
+    ctx.save();
+    ctx.translate(Math.round(d.x + d.w / 2), Math.round(d.y + d.h / 2));
+    ctx.rotate(d.rot);
+    drawPiece(ctx, d.img, d.sx, d.w, -d.w / 2, -d.h / 2);
+    ctx.restore();
+  }
+  for (const s of sparks) px(ctx, s.x, s.y, 1, 1, s.col);
+  for (const p of popups) if (p.life > 0.25 || Math.floor(T * 20) % 2) drawText(p.t, p.x, Math.round(p.y), p.col, 1, 'center');
+
+  drawHud();
+  ctx.restore();
+  if (state === 'enchant') drawEnchant();
+
+  if ((state === 'showdown' && sd.phase === 'outcome' && !won) || (state === 'result' && !res.won)) {
+    ctx.fillStyle = 'rgba(255,0,0,0.12)';
+    ctx.fillRect(0, 0, W, H);
+  }
+  if (state === 'result') drawResult();
+  if (titleFade > 0) { ctx.globalAlpha = titleFade; px(ctx, 0, 0, W, H, '#000'); ctx.globalAlpha = 1; }
+}
+
+function drawHud() {
+  if (state === 'title') {
+    drawText('WEAPON', 80, 14, C.accent, 3, 'center');
+    drawText('FORGE', 80, 34, C.text, 3, 'center');
+    drawText('STACK THE PARTS OF YOUR WEAPON.', 80, 58, C.dim, 1, 'center');
+    drawText('OFF-CENTER METAL GETS CUT.', 80, 66, C.dim, 1, 'center');
+    drawText('A TRUER WEAPON SLAYS THE BEAST.', 80, 74, C.dim, 1, 'center');
+    const nudge = Math.floor(T * 3) % 2;   // arrows twitch outward
+    drawText('<', 40 - nudge, 86, C.accent);
+    drawText(weapon.name, 80, 86, C.text, 1, 'center');
+    drawText('>', 117 + nudge, 86, C.accent);
+    if (blink()) drawText('SPACE TO FORGE', 80, 230, C.text, 1, 'center');
+    return;
+  }
+  if (state === 'building') {
+    const total = weapon.parts.length, n = Math.min(partIdx + 1, total);
+    drawText('PART ' + n + '/' + total, 4, 4, C.dim);
+    drawText(weapon.parts[Math.min(partIdx, total - 1)].name, 4, 12, C.accent);
+    drawText('POWER', W - 4, 4, C.dim, 1, 'right');
+    drawText(stack.length ? Math.round(avgAcc() * 100) + '%' : '--', W - 4, 12, C.text, 1, 'right');
+    if (buildSlow) drawText('FROST -' + pct(buildSlow), W - 4, 20, RUNES[1].col, 1, 'right');
+    if (autoBuild) drawText('AUTO-FORGING', 4, 230, C.accent, 1, 'left', false);
+    else if (phase !== 'broken') drawText('C: CHEAT', 4, 230, C.dim, 1, 'left', false);
+    if (partIdx === 0 && phase === 'slide' && blink()) drawText('SPACE TO DROP', 80, 30, C.text, 1, 'center');
+    return;
+  }
+  if (state === 'showdown') {
+    drawText('POWER ' + Math.round(power * 100) + '%', 80, 6, C.text, 1, 'center');
+    drawText('WIN CHANCE ' + Math.round(chance * 100) + '%', 80, 16, C.accent, 1, 'center');
+    px(ctx, 30, 25, 100, 4, '#000');
+    px(ctx, 31, 26, Math.round(98 * chance), 2, chance > 0.6 ? C.green : chance > 0.3 ? C.accent : C.red);
+    if (sd.alive) drawText(sd.enemy.name, Math.round(sd.mx), FLOOR_Y - sd.enemy.h - 12 - Math.round(sd.jump), sd.enemy.label, 1, 'center');
+    let y = 33;
+    for (const m of sd.mods) { drawText(m.t, 80, y, m.col, 1, 'center'); y += 8; }
+    if (sd.phase === 'ready' && blink()) drawText('SPACE TO STRIKE', 80, y + 4, C.text, 1, 'center');
+  }
+}
+
+function drawResult() {
+  const r = res;
+  ctx.globalAlpha = 0.92;
+  px(ctx, 12, 44, 136, 140, '#120b10');
+  ctx.globalAlpha = 1;
+  px(ctx, 12, 44, 136, 1, C.accent); px(ctx, 12, 183, 136, 1, C.accent);
+  px(ctx, 12, 44, 1, 140, C.accent); px(ctx, 147, 44, 1, 140, C.accent);
+
+  const title = r.shattered ? 'SHATTERED' : r.won ? 'VICTORY!' : 'DEFEAT';
+  drawText(title, 80, 52, r.won ? C.green : C.red, 2, 'center');
+  drawText('RANK: ' + rankFor(r) + (r.cheated ? ' (CHEAT)' : ''), 80, 70, C.accent, 1, 'center');
+  drawText(r.shattered ? 'THE WEAPON BROKE APART' : 'POWER ' + r.power + '%   CHANCE ' + r.chance + '%', 80, 80, C.text, 1, 'center');
+  drawText('BEASTS SLAIN ' + slain.size + '/' + ENEMY_SPRITES.length, 80, 88, slain.size === ENEMY_SPRITES.length ? C.green : C.dim, 1, 'center', false);
+
+  let y = 96;
+  for (let i = 0; i < weapon.parts.length; i++) {
+    const p = r.parts[i];
+    const name = p ? p.name : weapon.parts[i].name;
+    let val = '--', col = C.dim;
+    if (p && p.acc === null) { val = 'MISS'; col = C.red; }
+    else if (p) { val = p.acc === 1 ? 'PERFECT' : Math.round(p.acc * 100) + '%'; col = p.acc === 1 ? C.accent : p.acc > 0.75 ? C.text : C.red; }
+    drawText(name, 22, y, p ? C.text : C.dim, 1, 'left', false);
+    drawText(val, 138, y, col, 1, 'right', false);
+    y += 9;
+  }
+  if (r.rune) drawText(r.rune.t, 80, 150, r.rune.col, 1, 'center', false);
+  if (resultT > 0.6) {
+    if (endingDue) {
+      if (blink()) drawText('SPACE TO CONTINUE', 80, 161, C.text, 1, 'center');
+      drawText('ALL BEASTS SLAIN!', 80, 172, C.green, 1, 'center', false);
+    } else {
+      if (blink()) drawText('SPACE TO FORGE AGAIN', 80, 161, C.text, 1, 'center');
+      drawText('< > CHANGE WEAPON', 80, 172, C.dim, 1, 'center', false);
+    }
+  }
+}
+
+// ---------- enchanting ----------
+// After the last part lands, a random rune opens in a spellbook. Trace its sigil through the 3x3 dots
+// without leaving the inked path, and the rune's gem sets into the weapon. Leaving the path, letting go
+// or running out of time cracks the gem (the fight still happens, unenchanted). Space skips.
+// Dots are numbered 0-8, left to right, top to bottom. vals = effect at WEAK / STRONG / PERFECT.
+const RUNES = [
+  { id: 'fire', name: 'FIRE', col: '#ff7a2a', hi: '#ffd08a', ink: '#c0401a', path: [6, 3, 1, 5, 8],
+    vals: [0.05, 0.10, 0.15], desc: ['+WIN CHANCE', 'AGAINST ANY FOE'], range: '+5 / 10 / 15%' },
+  { id: 'frost', name: 'FROST', col: '#7fd8ff', hi: '#e6f8ff', ink: '#2a78b0', path: [0, 2, 6, 8],
+    vals: [0.10, 0.15, 0.20], desc: ['YOUR NEXT FORGE', 'SLIDES SLOWER'], range: '-10 / 15 / 20%' },
+  { id: 'lightning', name: 'LIGHTNING', col: '#ffe03a', hi: '#fff6b0', ink: '#a07a00', path: [1, 3, 5, 7],
+    vals: [0.5, 0.75, 1], desc: ['A SECOND STRIKE', 'IF FIRST FAILS'], range: '50 / 75 / 100%' },
+  { id: 'holy', name: 'HOLY', col: '#fff0b0', hi: '#ffffff', ink: '#a07a20', path: [1, 6, 8, 1],
+    vals: [0.10, 0.20, 0.30], desc: ['SMITES THE', 'UNDEAD'], range: '+10 / 20 / 30%' },
+  { id: 'venom', name: 'VENOM', col: '#7cff4a', hi: '#d8ffb0', ink: '#3a8a20', path: [2, 0, 3, 5, 8, 6],
+    vals: [0.10, 0.15, 0.20], desc: ['IF YOU FALL, THE', 'NEXT FOE IS WEAK'], range: '+10 / 15 / 20%' }
+];
+const STRENGTH = ['WEAK', 'STRONG', 'PERFECT'];
+const BOOK = { x: 6, y: 40, w: 148, h: 128 };
+const GRID = { x: 93, y: 76, s: 22 };     // first dot and spacing, on the right-hand page
+const PATH_HALF = 4;                       // half-width of the inked path in game pixels; leave it and the gem cracks
+const TRACE_TIME = 6;                      // seconds to trace
+let en = null;                             // the current enchanting attempt
+let poison = 0, frostSlow = 0, buildSlow = 0;   // effects carried into the next fight / next build
+const pct = v => Math.round(v * 100) + '%';
+
+const dotPos = i => ({ x: GRID.x + (i % 3) * GRID.s, y: GRID.y + Math.floor(i / 3) * GRID.s });
+function distSeg(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+  const t = l2 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2)) : 0;
+  return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t));
+}
+function lineP(c, x0, y0, x1, y1, col, size = 1, dotted = false) {
+  const n = Math.max(1, Math.round(Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0))));
+  for (let i = 0; i <= n; i++) {
+    if (dotted && i % 2) continue;
+    px(c, x0 + (x1 - x0) * i / n - (size >> 1), y0 + (y1 - y0) * i / n - (size >> 1), size, size, col);
+  }
+}
+
+// Gem sockets in world coordinates, skipping any that were sliced off when the part was cut.
+function gemSpots() {
+  return weapon.gems.map(g => {
+    const p = stack[g.part];
+    if (!p || g.x < p.sx || g.x + g.w > p.sx + p.w) return null;
+    return { x: p.x + g.x - p.sx, y: p.y + g.y, w: g.w, h: g.h };
+  }).filter(Boolean);
+}
+function drawGems(c, look) {
+  for (const s of gemSpots()) {
+    if (look === 'cracked') { px(c, s.x, s.y, s.w, s.h, '#55525e'); px(c, s.x, s.y, 1, 1, '#24222a'); }
+    else { px(c, s.x, s.y, s.w, s.h, look.col); px(c, s.x, s.y, 1, 1, look.hi); }
+  }
+}
+
+function beginEnchant() {
+  const rune = RUNES[Math.floor(Math.random() * RUNES.length)];
+  // the inked path, drawn once so its translucent fill doesn't darken where strokes overlap
+  const band = document.createElement('canvas'); band.width = W; band.height = H;
+  const g = band.getContext('2d');
+  for (let i = 0; i < rune.path.length - 1; i++) {
+    const a = dotPos(rune.path[i]), b = dotPos(rune.path[i + 1]), n = Math.ceil(Math.hypot(b.x - a.x, b.y - a.y));
+    for (let k = 0; k <= n; k++) disc(g, Math.round(a.x + (b.x - a.x) * k / n), Math.round(a.y + (b.y - a.y) * k / n), PATH_HALF, rune.ink);
+  }
+  const rnd = seeded(1 + Math.floor(Math.random() * 1e6)), crack = [];
+  for (let y = BOOK.y + 9; y <= BOOK.y + 93; y += 7) crack.push({ x: 92 + rnd() * 48, y });   // stays above the status text
+  en = { rune, phase: 'open', t: 0, left: TRACE_TIME, seg: 0, tracing: false, trail: [], devSum: 0, devN: 0,
+         strength: 0, ok: false, skipped: false, gemLook: null, band, crack, reason: '' };
+  state = 'enchant';
+  sfx.bookOpen();
+}
+
+function enchantDown(p) {
+  if (en.phase !== 'trace' || en.tracing) return;
+  const s = dotPos(en.rune.path[0]);
+  if (Math.hypot(p.x - s.x, p.y - s.y) <= 6) { en.tracing = true; en.seg = 0; en.trail = [p]; sfx.rune(0); }
+}
+function enchantMove(p) {
+  if (!en || !en.tracing) return;
+  const path = en.rune.path, last = en.trail[en.trail.length - 1];
+  if (Math.hypot(p.x - last.x, p.y - last.y) >= 0.75) en.trail.push(p);
+  let a = dotPos(path[en.seg]), b = dotPos(path[en.seg + 1]);
+  let d = distSeg(p, a, b);
+  // a fast flick can skip past a corner between two pointer samples: if we were near the corner
+  // and are now on the next stroke, count the corner as reached
+  if (d > PATH_HALF && en.seg + 2 < path.length && Math.hypot(last.x - b.x, last.y - b.y) < 10) {
+    const c = dotPos(path[en.seg + 2]), d2 = distSeg(p, b, c);
+    if (d2 <= PATH_HALF) { en.seg++; sfx.rune(en.seg); a = b; b = c; d = d2; }
+  }
+  if (d > PATH_HALF) return enchantFail('LEFT THE PATH');
+  en.devSum += d; en.devN++;
+  if (Math.hypot(p.x - b.x, p.y - b.y) <= 3.5) {
+    en.seg++; sfx.rune(en.seg);
+    if (en.seg >= path.length - 1) enchantSuccess();
+  }
+}
+function enchantUp() { if (en && en.tracing && en.phase === 'trace') enchantFail('LET GO TOO SOON'); }
+
+function enchantSuccess() {
+  const avg = en.devSum / Math.max(1, en.devN);       // average distance from the ideal line
+  en.strength = avg <= 1.3 ? 2 : avg <= 2.4 ? 1 : 0;
+  en.tracing = false; en.ok = true; en.phase = 'success'; en.t = 0; en.gemLook = en.rune;
+  const e = dotPos(en.rune.path[en.rune.path.length - 1]);
+  spawnSparks(e.x, e.y, 26, [en.rune.col, en.rune.hi, '#fff'], 70, false);
+  sfx.chime();
+}
+function enchantFail(reason) {
+  en.tracing = false; en.ok = false; en.reason = reason; en.phase = 'fail'; en.t = 0; en.gemLook = 'cracked';
+  const p = en.trail[en.trail.length - 1] || dotPos(en.rune.path[0]);
+  spawnSparks(p.x, p.y, 12, ['#8a7a6a', '#c9b78a', '#3a2418'], 50, false);
+  shake = 2;
+  sfx.crack();
+}
+function enchantSkip() {
+  if (en.phase !== 'open' && en.phase !== 'trace') return;
+  en.skipped = true; en.tracing = false; en.phase = 'close'; en.t = 0;
+}
+
+function updateEnchant(dt) {
+  en.t += dt;
+  if (en.phase === 'open') { if (en.t >= 0.6) { en.phase = 'trace'; en.t = 0; } }
+  else if (en.phase === 'trace') { en.left -= dt; if (en.left <= 0) enchantFail('TOO SLOW'); }
+  else if (en.phase === 'success' || en.phase === 'fail') { if (en.t >= 1.2) { en.phase = 'close'; en.t = 0; } }
+  else if (en.phase === 'close') {
+    if (en.t >= 0.45) {
+      if (en.skipped) { beginShowdown(); return; }
+      en.phase = 'gem'; en.t = 0;                        // book gone: show the gem setting into the weapon
+      for (const s of gemSpots()) spawnSparks(s.x + s.w / 2, s.y + s.h / 2, 12,
+        en.ok ? [en.rune.col, en.rune.hi, '#fff'] : ['#8a8a94', '#55525e'], en.ok ? 45 : 30, false);
+      if (en.ok) sfx.gemSet(); else sfx.crack();
+    }
+  }
+  else if (en.phase === 'gem') { if (en.t >= 1.1) beginShowdown(); }
+}
+
+function drawBook() {
+  const B = BOOK, r = en.rune, ink = '#4a2e1e', faint = '#a89070';
+  ctx.globalAlpha = 0.5; px(ctx, B.x + 3, B.y + 4, B.w, B.h, '#000'); ctx.globalAlpha = 1;
+  px(ctx, B.x, B.y, B.w, B.h, '#2e120c');                                     // leather cover
+  px(ctx, B.x + 1, B.y + 1, B.w - 2, B.h - 2, '#5a2618');
+  px(ctx, B.x + 1, B.y + 1, B.w - 2, 1, '#7a3a24');
+  for (const [cx, cy, sx, sy] of [[B.x, B.y, 1, 1], [B.x + B.w - 1, B.y, -1, 1], [B.x, B.y + B.h - 1, 1, -1], [B.x + B.w - 1, B.y + B.h - 1, -1, -1]]) {
+    px(ctx, sx > 0 ? cx : cx - 3, cy, 4, 1, C.gold); px(ctx, cx, sy > 0 ? cy : cy - 3, 1, 4, C.gold);   // gold corners
+  }
+  const LP = { x: B.x + 5, y: B.y + 4, w: 68, h: B.h - 9 }, RP = { x: B.x + B.w - 73, y: B.y + 4, w: 68, h: B.h - 9 };
+  for (const P of [LP, RP]) { px(ctx, P.x, P.y + 2, P.w, P.h, '#c9b78a'); px(ctx, P.x, P.y, P.w, P.h, '#ecdfb8'); }
+  ['#c9b78a', '#d6c597', '#e0d1a8', '#e6d8b0'].forEach((c, i) => {             // pages curving into the spine
+    px(ctx, LP.x + LP.w - 1 - i, LP.y, 1, LP.h, c); px(ctx, RP.x + i, RP.y, 1, RP.h, c);
+  });
+  px(ctx, 79, B.y + 2, 2, B.h - 4, '#2a100a');                                // spine
+  px(ctx, 30, B.y + B.h - 2, 3, 12, '#a0202a');                               // ribbon bookmark
+
+  // left page: the rune's name, its sigil in miniature, what it does
+  const lc = LP.x + LP.w / 2;
+  drawText('RUNE OF', lc, B.y + 10, faint, 1, 'center', false);
+  drawText(r.name, lc, B.y + 18, r.ink, r.name.length * 8 - 2 <= 64 ? 2 : 1, 'center', false);
+  const ms = 10, mx = lc - ms, my = B.y + 40;
+  for (let i = 0; i < 9; i++) px(ctx, mx + (i % 3) * ms, my + Math.floor(i / 3) * ms, 1, 1, faint);
+  for (let i = 0; i < r.path.length - 1; i++) {
+    const a = r.path[i], b = r.path[i + 1];
+    lineP(ctx, mx + (a % 3) * ms, my + Math.floor(a / 3) * ms, mx + (b % 3) * ms, my + Math.floor(b / 3) * ms, r.ink);
+  }
+  drawText(r.desc[0], lc, B.y + 72, ink, 1, 'center', false);
+  drawText(r.desc[1], lc, B.y + 80, ink, 1, 'center', false);
+  drawText(r.range, lc, B.y + 94, faint, 1, 'center', false);
+
+  // right page: the inked path, the dots, your trace
+  ctx.globalAlpha = 0.14; ctx.drawImage(en.band, 0, 0); ctx.globalAlpha = 1;
+  for (let i = 0; i < r.path.length - 1; i++) {
+    const a = dotPos(r.path[i]), b = dotPos(r.path[i + 1]);
+    lineP(ctx, a.x, a.y, b.x, b.y, faint, 1, true);
+  }
+  const tc = en.phase === 'fail' ? '#8a7a6a' : r.ink;
+  for (let i = 1; i < en.trail.length; i++) lineP(ctx, en.trail[i - 1].x, en.trail[i - 1].y, en.trail[i].x, en.trail[i].y, tc, 2);
+  const reached = en.tracing || en.phase === 'success' ? en.seg : -1;
+  for (let i = 0; i < 9; i++) { const d = dotPos(i); px(ctx, d.x - 1, d.y - 1, 3, 3, ink); }
+  for (let k = 0; k <= reached && k < r.path.length; k++) { const d = dotPos(r.path[k]); px(ctx, d.x - 1, d.y - 1, 3, 3, r.ink); }
+  if (en.phase === 'trace') {                                                  // pulse the dot to aim for
+    const d = dotPos(en.tracing ? r.path[en.seg + 1] : r.path[0]);
+    ring(ctx, d.x, d.y, 4 + Math.round(Math.sin(T * 8) + 1), r.ink);
+    const bw = 52;
+    px(ctx, 89, 136, bw, 2, '#c9b78a');
+    px(ctx, 89, 136, Math.round(bw * Math.max(0, en.left) / TRACE_TIME), 2, r.ink);    // time left
+    if (!en.tracing) drawText('TRACE THE SIGIL', RP.x + RP.w / 2, 146, ink, 1, 'center', false);
+  } else if (en.phase === 'success' || (en.phase === 'close' && en.ok)) {
+    drawText(STRENGTH[en.strength] + '!', RP.x + RP.w / 2, 146, r.ink, 1, 'center', false);
+    if (en.phase === 'success') { ctx.globalAlpha = Math.max(0, 0.5 - en.t * 0.5); px(ctx, RP.x, RP.y, RP.w, RP.h, r.col); ctx.globalAlpha = 1; }
+  } else if (en.phase === 'fail' || (en.phase === 'close' && !en.skipped)) {
+    for (let i = 1; i < en.crack.length; i++) lineP(ctx, en.crack[i - 1].x, en.crack[i - 1].y, en.crack[i].x, en.crack[i].y, '#3a2418');
+    drawText(en.reason, RP.x + RP.w / 2, 146, '#8a2a1a', 1, 'center', false);
+  }
+}
+
+function drawEnchant() {
+  if (en.phase === 'gem') {                     // the book is gone: the gem settles into the weapon
+    const k = Math.max(0, 1 - en.t / 0.8);
+    if (k > 0) {
+      ctx.globalAlpha = k;
+      for (const s of gemSpots()) ring(ctx, s.x + s.w / 2, s.y + s.h / 2, 3 + Math.round((1 - k) * 10), en.ok ? en.rune.hi : '#8a8a94');
+      ctx.globalAlpha = 1;
+    }
+    drawText(en.ok ? en.rune.name + ' RUNE - ' + STRENGTH[en.strength] : 'THE RUNE CRACKED', 80, 30, en.ok ? en.rune.col : '#8a8a94', 1, 'center');
+    return;
+  }
+  const k = en.phase === 'open' ? ease(en.t / 0.6) : en.phase === 'close' ? 1 - ease(en.t / 0.45) : 1;
+  ctx.globalAlpha = 0.6 * k; px(ctx, 0, 0, W, H, '#000'); ctx.globalAlpha = 1;
+  ctx.save(); ctx.translate(0, Math.round((1 - k) * 150)); drawBook(); ctx.restore();   // the book slides up
+  for (const s of sparks) px(ctx, s.x, s.y, 1, 1, s.col);
+  if (en.phase === 'open' || en.phase === 'trace') drawText('SPACE: SKIP RUNE', 80, 182, C.dim, 1, 'center', false);
+}
+
+// ---------- story intro ----------
+// Three frames before the title. Space/tap finishes the line, then moves on; Esc (or the SKIP corner) skips.
+const STORY = [
+  { scene: 'village', textAt: 'bottom', cue: 'wind',
+    text: 'BENEATH THE MOUNTAIN LIES EMBERHOLD, A VILLAGE OF SMITHS. FOR A HUNDRED YEARS ITS FORGES NEVER WENT COLD.' },
+  { scene: 'beasts', textAt: 'bottom', cue: 'dread',
+    text: 'THEN THE MOON WENT DARK. FROM THE MARSH AND THE GRAVES CAME THE BEASTS, AND ONE BY ONE THE FORGES FELL SILENT.' },
+  { scene: 'forge', textAt: 'top', cue: 'clang',
+    text: 'ONE SMITH REMAINS. BUILD YOUR WEAPON TRUE, FOR A CROOKED BLADE WILL NOT SAVE US.' }
+];
+// Played once every beast has been slain; then back to the title for a fresh hunt.
+const ENDING = [
+  { scene: 'dawn', textAt: 'bottom', cue: 'dawn',
+    text: 'THE LAST BEAST HAS FALLEN. DAWN RISES OVER EMBERHOLD, ITS FORGES BURN AGAIN, AND THE VILLAGE IS SAFE AT LAST.' }
+];
+const TYPE_CPS = 32;                 // typewriter speed, characters per second
+const st = { seq: STORY, idx: 0, t: 0, begun: false, shown: 0, fade: 1, fadeDir: -1, next: null, hammerT: 0, eyesLit: 0 };
+
+function storyTyped() { return Math.min(st.seq[st.idx].text.length, Math.floor(Math.max(0, st.t - 0.3) * TYPE_CPS)); }
+function storyCue(i) {
+  st.idx = i; st.t = 0; st.shown = 0; st.eyesLit = 0; st.hammerT = 0.2;
+  const c = st.seq[i].cue;
+  if (c === 'wind') sfx.wind(); else if (c === 'dread') sfx.dread(); else if (c === 'dawn') sfx.dawn();
+}
+function playEnding() {
+  slain.clear();                                   // the hunt starts over after the ending
+  sparks = []; popups = [];
+  Object.assign(st, { seq: ENDING, idx: 0, begun: true, fade: 1, fadeDir: -1, next: null });
+  state = 'story';
+  storyCue(0);
+}
+function fadeThen(fn) { if (st.fadeDir !== 1) { st.fadeDir = 1; st.next = fn; } }
+function enterTitle() { sparks = []; state = 'title'; titleFade = 1; }
+function storyAdvance() {
+  if (!st.begun) { st.begun = true; storyCue(0); return; }   // first press: unlocks audio, starts the story
+  if (st.fadeDir === 1) return;
+  if (storyTyped() < st.seq[st.idx].text.length) { st.t = 99; return; }   // finish the line first
+  fadeThen(() => { if (st.idx < st.seq.length - 1) storyCue(st.idx + 1); else enterTitle(); });
+}
+function storySkip() { fadeThen(enterTitle); }
+
+function updateStory(dt) {
+  if (st.fadeDir) {
+    st.fade += st.fadeDir * dt / 0.4;
+    if (st.fade <= 0) { st.fade = 0; st.fadeDir = 0; }
+    else if (st.fade >= 1) { st.fade = 1; st.fadeDir = -1; const f = st.next; st.next = null; if (f) f(); }
+  }
+  if (!st.begun || state !== 'story') return;
+  st.t += dt;
+  const text = st.seq[st.idx].text, n = storyTyped();
+  if (n > st.shown) { if (text[n - 1] !== ' ' && n % 2) sfx.tick(); st.shown = n; }
+  const scene = st.seq[st.idx].scene;
+  if (scene === 'beasts') {                       // eyes open one by one
+    const lit = Math.min(ENEMY_SPRITES.length, Math.max(0, Math.floor((st.t - 0.8) / 0.45) + 1));
+    if (lit > st.eyesLit) { st.eyesLit = lit; sfx.eye(); }
+  } else if (scene === 'forge') {                 // the last smith, hammering
+    st.hammerT -= dt;
+    if (st.hammerT <= 0) {
+      st.hammerT = 1.3; shake = 1.5;
+      sfx.clang(0.95);
+      spawnSparks(80, BASE_Y, 16, ['#fff', '#ffe27a', '#ff9a3a', '#ff5a1a'], 75, true);
+    }
+  }
+}
+
+// deterministic random, so scenery stays put between frames
+function seeded(seed) { let s = seed; return () => (s = (s * 16807) % 2147483647) / 2147483647; }
+// dithered vertical gradient through a list of colours (2x2 Bayer pattern keeps it pixel-art)
+function ditherSky(g, cols, h) {
+  const bayer = [0, 0.5, 0.75, 0.25];
+  for (let y = 0; y < h; y++) {
+    const t = y / h * (cols.length - 1), i = Math.floor(t), f = t - i;
+    for (let x = 0; x < W; x++) {
+      g.fillStyle = cols[Math.min(cols.length - 1, f > bayer[(x & 1) + (y & 1) * 2] ? i + 1 : i)];
+      g.fillRect(x, y, 1, 1);
+    }
+  }
+}
+function disc(g, cx, cy, r, col) {
+  g.fillStyle = col;
+  for (let y = -r; y <= r; y++) { const hw = Math.round(Math.sqrt(r * r - y * y)); g.fillRect(cx - hw, cy + y, hw * 2 + 1, 1); }
+}
+function ring(g, cx, cy, r, col) {
+  g.fillStyle = col;
+  for (let a = 0; a < 360; a += 2) g.fillRect(Math.round(cx + Math.cos(a * Math.PI / 180) * r), Math.round(cy + Math.sin(a * Math.PI / 180) * r), 1, 1);
+}
+const MOON = { x: 116, y: 38, r: 13 };
+const HORIZON = 168;
+
+// Emberhold, at night (story frame 1) or at dawn (the ending, once every beast is slain)
+function makeVillage(dawn) {
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'), rnd = seeded(7);
+  const P = dawn
+    ? { sky: ['#2a1a48', '#5a2a62', '#a04a66', '#e07a52', '#f6b862'], far: '#4a2a4e', snow: '#f0c8b0', near: '#2c1a34', ground: '#1a1020',
+        house: '#3a2436', shade: '#2a1a2a', roof: '#2e1c2c', lit: '#e8a070', unlit: '#5a3a4a' }
+    : { sky: ['#07061a', '#0d0b26', '#1a1238', '#2c1a44', '#3d2248'], far: '#1c1530', snow: '#6b6385', near: '#120d1e', ground: '#0a0712',
+        house: '#1d1529', shade: '#150f1f', roof: '#171020', lit: '#3a2c4c', unlit: '#2a2038' };
+  ditherSky(g, P.sky, HORIZON);
+  const far = x => 112 - 42 * Math.exp(-(((x - 55) / 30) ** 2)) - 16 * Math.exp(-(((x - 122) / 24) ** 2)) + Math.sin(x * 0.7) * 1.5;
+  const near = x => 142 - 16 * Math.exp(-(((x - 132) / 22) ** 2)) - 10 * Math.exp(-(((x - 18) / 18) ** 2)) + Math.sin(x * 1.3);
+  const stars = [];
+  if (dawn) {                                                       // the sun, rising behind the ridge
+    ring(g, MOON.x, 84, 19, '#f4a060'); ring(g, MOON.x, 84, 16, '#ffd28a');
+    disc(g, MOON.x, 84, 12, '#fff0c0');
+  } else {
+    for (let i = 0; i < 46; i++) {
+      const x = Math.floor(rnd() * W), y = Math.floor(rnd() * 100);
+      if (y < far(x) - 3 && Math.hypot(x - MOON.x, y - MOON.y) > MOON.r + 4) stars.push({ x, y, p: rnd() * 6.28 });
+    }
+    ring(g, MOON.x, MOON.y, MOON.r + 3, '#4a3360');
+    disc(g, MOON.x, MOON.y, MOON.r, '#f4e8c8');
+    disc(g, MOON.x + 4, MOON.y - 3, 3, '#dccca4'); disc(g, MOON.x - 5, MOON.y + 4, 2, '#dccca4'); disc(g, MOON.x + 2, MOON.y + 7, 1, '#dccca4');
+  }
+  for (let x = 0; x < W; x++) {
+    const yf = Math.round(far(x));
+    px(g, x, yf, 1, HORIZON - yf, P.far);
+    if (yf < 84) px(g, x, yf, 1, Math.max(1, Math.round((84 - yf) / 4)), P.snow);   // snow on the peak
+    const yn = Math.round(near(x));
+    px(g, x, yn, 1, HORIZON - yn, P.near);
+  }
+  px(g, 0, 158, W, H - 158, P.ground);
+  const windows = [], chimneys = [];
+  [[6, 18, 12], [28, 14, 10], [48, 22, 14], [76, 16, 11], [98, 20, 13], [124, 16, 10], [144, 14, 12]].forEach(([x, w, h], i) => {
+    const base = 164, top = base - h;
+    px(g, x, top, w, h, P.house);
+    px(g, x + w - 2, top, 2, h, P.shade);                                                                 // shaded side
+    const rh = Math.ceil(w / 2) + 1;
+    for (let r = 0; r < rh; r++) {                                                                         // roof, lit edge
+      px(g, x - 2 + r, top - r, w + 4 - r * 2, 1, P.roof);
+      px(g, x - 2 + r, top - r, 1, 1, P.lit); px(g, x + w + 1 - r, top - r, 1, 1, P.unlit);
+    }
+    windows.push({ x: x + 3, y: top + 4, p: i * 1.7 });
+    if (w >= 18) windows.push({ x: x + w - 6, y: top + 4, p: i * 2.3 + 1 });
+    if (i === 2 || (dawn && (i === 0 || i === 4))) {               // at dawn, more forges are lit again
+      px(g, x + w - 6, top - 9, 3, 6, P.roof); px(g, x + w - 6, top - 9, 3, 1, P.lit);
+      chimneys.push({ x: x + w - 5, y: top - 10, p: i });
+    }
+  });
+  return { c, stars, windows, chimneys, dawn };
+}
+const village = makeVillage(false), dawnVillage = makeVillage(true);
+
+// Frame 2: the marsh and the graves, with the beasts waiting in the dark
+const marsh = (() => {
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'), rnd = seeded(3);
+  ditherSky(g, ['#030208', '#07050f', '#0d0918', '#160d1f'], HORIZON);
+  ring(g, MOON.x, MOON.y, MOON.r, '#2a2236');                      // the moon, gone dark
+  disc(g, MOON.x, MOON.y, MOON.r - 1, '#050308');
+  const tree = (x, s) => {                                          // dead trees
+    px(g, x, 112, 2, HORIZON - 112, '#0c0912');
+    for (const [by, dir, len] of [[124, -1, 10], [132, 1, 12], [142, -1, 8], [118, 1, 7]])
+      for (let k = 0; k < len; k++) px(g, x + (dir > 0 ? 2 : -1) + dir * k, by - Math.floor(k * 0.6 * s), 1, 1, '#0c0912');
+  };
+  tree(6, 1); tree(150, 1.2);
+  for (let i = 0; i < 9; i++) {                                     // gravestones
+    const x = 8 + i * 17 + Math.floor(rnd() * 6), h = 7 + Math.floor(rnd() * 5);
+    if (rnd() < 0.3) { px(g, x + 2, HORIZON - h - 2, 2, h + 2, '#120d1a'); px(g, x, HORIZON - h + 1, 6, 2, '#120d1a'); }
+    else { px(g, x, HORIZON - h, 6, h, '#120d1a'); px(g, x + 1, HORIZON - h - 1, 4, 1, '#120d1a'); }
+  }
+  px(g, 0, HORIZON, W, H - HORIZON, '#050308');
+  return { c, xs: [18, 47, 80, 112, 142] };
+})();
+
+function drawVillage(v = village) {
+  ctx.drawImage(v.c, 0, 0);
+  for (const s of v.stars) px(ctx, s.x, s.y, 1, 1, Math.sin(T * 2 + s.p) > -0.3 ? '#cfd6ff' : '#4a4f78');
+  for (const w of v.windows) px(ctx, w.x, w.y, 2, 3, Math.sin(T * 5 + w.p) > -0.7 ? '#ffb347' : '#e07a2a');
+  for (const ch of v.chimneys) {
+    for (let k = 0; k < 7; k++) {                                   // chimney smoke
+      const age = ((T * 0.25 + k / 7 + ch.p * 0.13) % 1), y = ch.y - age * 34;
+      ctx.globalAlpha = 0.55 * (1 - age);
+      px(ctx, ch.x + Math.sin(T * 1.4 + k + ch.p) * 2 + age * 10, y, 2, 2, v.dawn ? '#9a7a8a' : '#5d566e');
+    }
+  }
+  ctx.globalAlpha = 1;
+  if (v.dawn) {                                                     // birds crossing the morning sky
+    for (let b = 0; b < 4; b++) {
+      const bx = ((T * (9 + b * 2) + b * 47) % (W + 20)) - 10, by = 30 + b * 9 + Math.sin(T * 2 + b) * 2;
+      const flap = Math.sin(T * 10 + b * 2) > 0 ? 1 : 0;
+      px(ctx, bx - 2, by - flap, 2, 1, '#2a1a30'); px(ctx, bx, by, 1, 1, '#2a1a30'); px(ctx, bx + 1, by - flap, 2, 1, '#2a1a30');
+    }
+  }
+}
+
+function drawBeasts() {
+  ctx.drawImage(marsh.c, 0, 0);
+  ENEMY_SPRITES.forEach((e, i) => {
+    const x = Math.round(marsh.xs[i] - e.w / 2), y = HORIZON - e.h;
+    ctx.drawImage(e.sil, x, y);
+    const blinking = ((T * 0.7 + i * 1.3) % 3) < 0.12;
+    if (i < st.eyesLit && !blinking) ctx.drawImage(e.glow, x, y);
+  });
+  for (let k = 0; k < 6; k++) {                                     // marsh fog drifting past
+    ctx.globalAlpha = 0.07;
+    const fx = ((T * 6 + k * 37) % (W + 60)) - 60;
+    px(ctx, fx, HORIZON - 10 + (k % 3) * 3, 60, 4, '#8a86a0');
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawForgeScene() {
+  ctx.save();
+  if (shake > 0) ctx.translate(Math.round((Math.random() * 2 - 1) * shake), 0);
+  ctx.drawImage(bg, 0, 0);
+  drawGlow();
+  drawAnvil();
+  ctx.restore();
+}
+
+// splits text into lines of at most max characters, on spaces
+function wrapText(text, max) {
+  const lines = []; let line = '';
+  for (const word of text.split(' ')) {
+    if (line && (line + ' ' + word).length > max) { lines.push(line); line = word; }
+    else line = line ? line + ' ' + word : word;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function renderStory() {
+  const f = st.seq[st.idx];
+  if (f.scene === 'village') drawVillage();
+  else if (f.scene === 'dawn') drawVillage(dawnVillage);
+  else if (f.scene === 'beasts') drawBeasts();
+  else drawForgeScene();
+  for (const s of sparks) px(ctx, s.x, s.y, 1, 1, s.col);
+
+  const top = f.textAt === 'top';
+  if (!top) {                                                       // caption panel
+    ctx.globalAlpha = 0.88; px(ctx, 0, 176, W, H - 176, '#07050a'); ctx.globalAlpha = 1;
+    px(ctx, 0, 176, W, 1, '#3a2a30');
+  }
+  const y0 = top ? 34 : 186;
+  const lines = wrapText(f.text, 36);
+  if (!st.begun) {
+    drawText('EMBERHOLD', 80, 112, C.accent, 2, 'center');
+    if (blink()) drawText('SPACE / TAP TO BEGIN', 80, y0 + 12, C.text, 1, 'center');
+  } else {
+    let left = storyTyped();
+    lines.forEach((ln, i) => {
+      const s = ln.slice(0, Math.max(0, left));
+      left -= ln.length + 1;
+      if (s) drawText(s, 8, y0 + i * 9, C.text);
+    });
+    const done = storyTyped() >= f.text.length;
+    if (f.scene === 'dawn' && done) drawText('THE END', 80, 120, C.accent, 2, 'center');
+    if (done && blink()) {
+      const last = st.idx === st.seq.length - 1;
+      drawText(last && st.seq === STORY ? 'SPACE TO FORGE >' : 'SPACE >', W - 8, top ? y0 + lines.length * 9 + 6 : 228, C.accent, 1, 'right');
+    }
+    for (let i = 0; i < st.seq.length; i++)                        // progress dots
+      px(ctx, 8 + i * 6, top ? y0 + lines.length * 9 + 8 : 230, 3, 3, i === st.idx ? C.accent : '#4a3a40');
+    drawText('ESC: SKIP', W - 4, 4, C.dim, 1, 'right', false);
+  }
+  if (st.fade > 0) { ctx.globalAlpha = st.fade; px(ctx, 0, 0, W, H, '#000'); ctx.globalAlpha = 1; }
+}
+
+// ---------- loop ----------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  update(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
